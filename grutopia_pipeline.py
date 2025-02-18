@@ -14,9 +14,6 @@ os.environ['CUDA_VISIBLE_DEVICES'] = args_gpu.gpu
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1'
 
 simulation_app = SimulationApp({"headless": True})
-# action_registry = omni.kit.actions.core.get_action_registry()
-# action = action_registry.get_action("omni.kit.viewport.menubar.lighting", "set_lighting_mode_camera")
-# action.execute()
 
 from pxr import Usd, UsdGeom,UsdLux
 import numpy as np
@@ -182,8 +179,6 @@ for house_id in sorted(os.listdir(args.grutopia)):
                 tobase_extrinsic = build_transformation_mat(camera_translation * np.array([0,0,1]),camera_rotation)
                 distance = np.sum(np.abs(np.array(path_planner.navigable_pcd.points) - camera_translation),axis=-1)
                 condition = np.where((path_planner.safe_value>0.2) & (distance > 5.0))[0]
-                # os.mkdir("%s/%s"%(args.output_dir,house_id))
-                # cv2.imwrite("%s/%s/decision_map.jpg"%(args.output_dir,house_id),path_planner.color_decision_map)
                 if condition.shape[0] == 0:
                     print("condition shape0 is 0")
                     continue
@@ -240,11 +235,9 @@ for house_id in sorted(os.listdir(args.grutopia)):
                 json_object = json.dumps(save_dict, indent=4)
                 with open("%s/%s/trajectory_%d/data.json"%(args.output_dir,house_id,trajectory_index), "w") as outfile:
                     outfile.write(json_object)
-        # stage_utils.clear_stage("/World/scene")
+
         delete_prim("/World/scene")
-        # world.reset()
-            #if not save_flag:
-            #    shutil.rmtree("%s/%s/trajectory_%d"%(args.output_dir,house_id,trajectory_index))
+
                 
 
 
