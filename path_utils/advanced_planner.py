@@ -11,6 +11,7 @@ from pathfinding.core.diagonal_movement import DiagonalMovement
 from pathfinding.core.grid import Grid
 from pathfinding.finder.a_star import AStarFinder
 from path_optimizer import optimize_trajectory
+from scipy.interpolate import splprep, splev
 class PathPlanner:
     def __init__(self,ceiling_offset=1.8,grid_resolution=0.05,safe_distance=0.3,robot_lin_speed=0.8,robot_ang_speed=1.0,sim_dt=0.05):
         self.ceiling_offset = ceiling_offset
@@ -143,12 +144,34 @@ class PathPlanner:
         angles.append(angles[-1])
         return angles
 
+    def interpolate_angles(self, t, key_angles, t_fine):
+        interpolated_angles = []
+        for i in range(len(t) - 1):
+            start_index = np.searchsorted(t_fine, t[i])
+            end_index = np.searchsorted(t_fine, t[i + 1])
+            num_points = end_index - start_index
+            if num_points > 0:
+                angle_start = key_angles[i]
+                angle_end = key_angles[i + 1]
+                diff = angle_end - angle_start
+                if diff > np.pi:
+                    diff -= 2 * np.pi
+                elif diff < -np.pi:
+                    diff += 2 * np.pi
+                interpolated = angle_start + np.linspace(0, diff, num_points)
+                interpolated = (interpolated + np.pi) % (2 * np.pi) - np.pi
+                interpolated_angles.extend(interpolated)
+                
+        interpolated_angles.append(key_angles[-1])
+        return interpolated_angles
+
     def generate_trajectory(self,start_point,end_point, start_angle=None):
         # range of start angle should be [-pi, pi]
         status,waypoints = self.astar_waypoint(start_point,end_point)
         if status == False:
             return False,[],[]
         rotate_in_place = False
+        # waypoints = self.smooth_path(waypoints, smooth_factor=0.5, num_points=waypoints.shape[0])
         initial_points = waypoints[::3]
 
         # decide whether to rotate in place
@@ -177,8 +200,10 @@ class PathPlanner:
         t_fine = np.linspace(0,1,optimized_points.shape[0]*100)
         self.x_fine = cs_x(t_fine)
         self.y_fine = cs_y(t_fine)
+        optimized_rotations = self.astar_rotation(optimized_points)
+        result_rotations = self.interpolate_angles(t, optimized_rotations, t_fine)
         result_points = np.stack((self.x_fine,self.y_fine),axis=-1)
-        result_rotations = self.astar_rotation(result_points)
+        # result_rotations = self.astar_rotation(result_points)
         # only for optimization comparison
         t_init = np.linspace(0,1,self.initial_pts.shape[0])
         cs_x_init = CubicSpline(t_init,self.initial_pts[:,0])
