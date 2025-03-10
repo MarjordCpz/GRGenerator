@@ -12,6 +12,10 @@ from pathfinding.core.grid import Grid
 from pathfinding.finder.a_star import AStarFinder
 from path_optimizer import optimize_trajectory
 from scipy.interpolate import splprep, splev
+from scipy.spatial import ConvexHull
+from shapely.geometry import Polygon
+
+
 class PathPlanner:
     def __init__(self,ceiling_offset=1.8,grid_resolution=0.05,safe_distance=0.3,robot_lin_speed=0.8,robot_ang_speed=1.0,sim_dt=0.05):
         self.ceiling_offset = ceiling_offset
@@ -77,14 +81,11 @@ class PathPlanner:
         self.esdf = esdf
 
     def reset(self,floor_height,robot_height,scene_pcd):
-        # def filter_free_noise():
-
         scene_points = np.array(scene_pcd.points)
         self.robot_height = robot_height
         self.scene_pcd = scene_pcd.select_by_index(np.nonzero((scene_points[:,2] < floor_height + self.ceiling_offset) & (scene_points[:,2] > floor_height - 0.1))[0])
-        # filter free noise
         scene_points = np.array(self.scene_pcd.points)
-        self.navigable_pcd = self.scene_pcd.select_by_index(np.nonzero((scene_points[:,2] < floor_height + 0.2) & (scene_points[:,2] > floor_height - 0.2))[0])
+        self.navigable_pcd = self.scene_pcd.select_by_index(np.nonzero((scene_points[:,2] < floor_height + 0.1) & (scene_points[:,2] > floor_height - 0.1))[0])
         self.obstacle_pcd = self.scene_pcd.select_by_index(np.nonzero((scene_points[:,2] > floor_height + 0.2) & (scene_points[:,2] < 2*robot_height))[0])
         self.obstacle_distance = pointcloud_2d_distance(self.navigable_pcd,self.obstacle_pcd.voxel_down_sample(self.grid_resolution))
         # smaller distance -> smaller value
@@ -96,7 +97,72 @@ class PathPlanner:
         self.decision_value = np.array(self.safe_value)
         self.decision_map,self.color_decision_map = self.point_to_map(np.array(self.navigable_pcd.points),self.decision_value)
         self.to_esdf(self.decision_map)
-    
+        self.navigable_clusters = self.cluster_navigable_points(visualize=False)
+        self.clusters_score = []
+        for cluster in self.navigable_clusters:
+            cluster_points = np.array(cluster.points)
+            self.clusters_score.append(cluster_points.shape[0])
+        self.clusters_score = np.array(self.clusters_score)
+        self.clusters_score = (self.clusters_score / self.clusters_score.max() + 1) 
+
+    def cluster_navigable_points(self, visualize=True):
+        available_points = self.navigable_pcd.select_by_index(np.where(self.safe_value > 0.1)[0])
+        print("available points:",np.array(available_points.points).shape[0])
+        wall_points = self.navigable_pcd.select_by_index(np.where(self.safe_value < 0.1)[0])
+        wall_2d_hull = ConvexHull(np.array(wall_points.points)[:,0:2])
+        wall_2d_polygon = Polygon(np.array(wall_points.points)[:,0:2][wall_2d_hull.vertices])
+        labels = np.array(available_points.cluster_dbscan(eps=4*self.grid_resolution,min_points=20))
+
+        if visualize:
+            unique_labels = set(labels)
+            colors = [plt.cm.Spectral(each) for each in np.linspace(0, 1, len(unique_labels))]
+            plt.figure(figsize=(10, 8))
+            for k, col in zip(unique_labels, colors):
+                if k == -1:
+                    col = [0, 0, 0, 1]
+                class_member_mask = (labels == k)
+                xy = np.array(available_points.points)[:,0:2][class_member_mask]
+                plt.plot(xy[:, 0], xy[:, 1], 'o', markerfacecolor=tuple(col),
+                        markeredgecolor='k', markersize=6)
+
+            plt.title('2D Point Cloud Clustering (DBSCAN)')
+            plt.xlabel('X')
+            plt.ylabel('Y')
+            plt.grid(True)
+            plt.savefig('clustering_visualization.png')
+        debug_pointcloud = o3d.geometry.PointCloud()
+        cluster_navigable_points = []
+        for i,label in enumerate(np.unique(labels)):
+            color = np.random.rand(1,3)
+            cluster_points = available_points.select_by_index(np.where(labels == label)[0])
+            print(label)
+            print(np.array(cluster_points.points).shape[0])
+            if np.array(cluster_points.points).shape[0] <= 3:
+                continue
+            navi_2d_hull = ConvexHull(np.array(cluster_points.points)[:,0:2])
+            navi_2d_polygon = Polygon(np.array(cluster_points.points)[:,0:2][navi_2d_hull.vertices])
+            if wall_2d_polygon.contains(navi_2d_polygon) and np.array(cluster_points.points).shape[0] > 1000: 
+                cluster_points.colors = o3d.utility.Vector3dVector(np.tile(color,(len(cluster_points.points),1)))
+                debug_pointcloud = debug_pointcloud + cluster_points
+                cluster_navigable_points.append(cluster_points)
+        return cluster_navigable_points
+
+    def start_end_sampler(self, minimum_distance=5.0):
+        cluster_index = np.random.choice(len(self.navigable_clusters),p=np.exp(self.clusters_score/0.2)/np.sum(np.exp(self.clusters_score/0.2)))
+        cluster_points = np.array(self.navigable_clusters[cluster_index].points)
+        cluster_points_max, cluster_points_min = cluster_points.max(axis=0), cluster_points.min(axis=0)
+        cluster_max_distance = np.linalg.norm(cluster_points_max - cluster_points_min)
+        print("area distance:", cluster_max_distance)
+        minimum_distance = min(minimum_distance, cluster_max_distance - 1)
+        start_point = cluster_points[np.random.choice(cluster_points.shape[0])]
+        distance = points_2d_distance(cluster_points,np.array([start_point]))
+        possible_index = np.where(distance > minimum_distance)[0]
+        if len(possible_index) == 0:
+            return False,[],[]
+        else:
+            return True,start_point,cluster_points[np.random.choice(possible_index)]
+        
+
     def point_to_grid(self,point):
         if len(point.shape) == 1:
             grid_index = np.floor((point[0:2] - self.min_bound[0:2])/self.grid_resolution).astype(np.int32)
