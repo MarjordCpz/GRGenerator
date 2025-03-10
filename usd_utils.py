@@ -3,6 +3,7 @@ from pxr import Usd, UsdGeom, Gf, Sdf
 import os
 import open3d as o3d
 from scipy.ndimage import gaussian_filter
+from scipy.ndimage import label
 
 # ===========================================
 # Functions to process bounding boxes
@@ -78,6 +79,34 @@ def is_bbox_nearby(bbox_a, bbox_b, scale_factor=0.001):
     distance = np.sqrt(distance) 
     is_near = distance <= distance_threshold
     return is_near, distance
+
+# ===========================================
+# Functions to process the whole stage
+# ===========================================
+def find_stage_all_lights(stage):
+    all_prims = stage.TraverseAll()
+    light_num = 0
+    for prim in all_prims:
+        if prim.GetTypeName() in ['CylinderLight', 'DistantLight', 'DomeLight', 'DiskLight', 'GeometryLight', 'RectLight', 'SphereLight']:
+            light_num += 1
+    return light_num
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -318,7 +347,7 @@ def sample_points_from_prim(prim, num_points=1000):
 # Functions to process pointcloud
 # ===============================
 
-def filter_free_noise(pcd):
+def filter_free_noise_v1(pcd):
 
     def calculate_adaptive_threshold(density_smooth, method='percentile', percentile=5, n_sigma=1):
 
@@ -369,4 +398,162 @@ def filter_free_noise(pcd):
     )[0]
     # print(filtered_scene_points_indices)
     pcd.points = o3d.utility.Vector3dVector(points[filtered_scene_points_indices])
+    return pcd
+
+def filter_free_noise(pcd, plane='xy', visualize=False):
+    points = np.array(pcd.points)
+    
+    if plane == 'xy':
+        points_plane = points[:, 0:2]
+    elif plane == 'xz':
+        points_plane = np.concatenate([points[:, 0:1], points[:, 2:3]], axis=1)
+    else:
+        raise ValueError("Invalid plane parameter. Allowed values are 'xy' and 'xz'.")
+
+    min_vals = np.min(points_plane, axis=0)
+    max_vals = np.max(points_plane, axis=0)
+
+    grid_resolution = 0.1
+    epsilon = 1e-10
+    bins = [np.arange(min_val, max_val + grid_resolution + epsilon, grid_resolution) for min_val, max_val in zip(min_vals, max_vals)]
+
+    density, edge1, edge2 = np.histogram2d(
+        points_plane[:, 0], points_plane[:, 1], bins=bins
+    )
+    edges = [edge1, edge2]
+    non_zero_density = density > 0
+    labeled_array, num_features = label(non_zero_density)
+
+    clusters = [[] for _ in range(num_features)]
+    for point in points:
+        if plane == 'xy':
+            coords = [point[0], point[1]]
+        elif plane == 'xz':
+            coords = [point[0], point[2]]
+        indices = [np.searchsorted(edge, coord, side='right') - 1 for coord, edge in zip(coords, edges)]
+        if all(0 <= idx < len(edge) - 1 for idx, edge in zip(indices, edges)):
+            label_value = labeled_array[tuple(indices)]
+            if label_value > 0:
+                clusters[label_value - 1].append(point)
+
+    clusters = [np.array(cluster) for cluster in clusters]
+    cluster_densities = []
+    cluster_areas = []
+    cluster_sizes = []
+    for i in range(num_features):
+        area = np.sum(labeled_array == (i + 1)) * grid_resolution**2
+        cluster_density = len(clusters[i]) / (area + 1e-6)
+        cluster_sizes.append(len(clusters[i]))
+        cluster_areas.append(area)
+        cluster_densities.append(cluster_density)
+
+    normalized_sizes = np.array(cluster_sizes) / np.max(cluster_sizes)
+    normalized_areas = np.array(cluster_areas) / np.max(cluster_areas)
+    normalized_densities = np.array(cluster_densities) / np.max(cluster_densities)
+    weights = {"size": 0.5, "area": 0.3, "density": 0.2}
+
+    combined_scores = (
+        weights["size"] * normalized_sizes +
+        weights["area"] * normalized_areas +
+        weights["density"] * normalized_densities
+    )
+    print(combined_scores)
+    main_cluster_idx = np.argmax(combined_scores)
+    pcd.points = o3d.utility.Vector3dVector(clusters[main_cluster_idx])
+    if visualize:
+        o3d.visualization.draw_geometries([pcd])
+    return pcd
+
+
+
+def get_z_distribution_coordinate_length(z_points_in_grid, bins):
+    hist, bin_edges = np.histogram(z_points_in_grid, bins)
+    non_zero_indices = np.where(hist != 0)[0]
+    total_length = 0
+    for index in non_zero_indices:
+        start = bin_edges[index]
+        end = bin_edges[index + 1]
+        length = end - start
+        total_length += length
+
+    return total_length
+
+def filter_extra_ground(pcd, grid_resolution=1):
+    points = np.array(pcd.points)
+    points_xy = points[:, :2]
+    points_z = points[:, 2]
+
+    x_min, x_max = np.min(points_xy[:, 0]), np.max(points_xy[:, 0])
+    y_min, y_max = np.min(points_xy[:, 1]), np.max(points_xy[:, 1])
+    z_min, z_max = np.min(points_z), np.max(points_z)
+    z_resolution = 0.1
+    z_max_length = z_max - z_min
+
+    x_bins = np.arange(x_min, x_max + grid_resolution, grid_resolution)
+    y_bins = np.arange(y_min, y_max + grid_resolution, grid_resolution)
+    z_bins = np.arange(z_min, z_max + z_resolution, z_resolution)
+    
+
+    z_ratio = np.zeros((len(x_bins) - 1, len(y_bins) - 1))
+    all_z_grid_lengths = []
+    all_occupy_ratios = []  
+
+
+    for i in range(len(x_bins) - 1):
+        for j in range(len(y_bins) - 1):
+            mask = (points_xy[:, 0] >= x_bins[i]) & (points_xy[:, 0] < x_bins[i + 1]) & \
+                   (points_xy[:, 1] >= y_bins[j]) & (points_xy[:, 1] < y_bins[j + 1])
+            z_points_in_grid = points_z[mask]
+            if len(z_points_in_grid) > 0:
+                z_grid_min = np.min(z_points_in_grid)
+                z_grid_max = np.max(z_points_in_grid)
+                z_grid_length = z_grid_max - z_grid_min
+                all_z_grid_lengths.append(z_grid_length)
+                z_distribution = get_z_distribution_coordinate_length(z_points_in_grid, z_bins)
+
+
+                if z_grid_length > 0:
+                    occupy_ratio = z_distribution / z_max_length
+
+                else:
+                    occupy_ratio = 0.0  
+                all_occupy_ratios.append(occupy_ratio)
+            else:
+                all_z_grid_lengths.append(0)
+                all_occupy_ratios.append(0.0)
+
+    max_z_grid_length = np.max(all_z_grid_lengths) if len(all_z_grid_lengths) > 0 else 1
+
+    index = 0
+    for i in range(len(x_bins) - 1):
+        for j in range(len(y_bins) - 1):
+            z_grid_length = all_z_grid_lengths[index]
+            occupy_ratio = all_occupy_ratios[index]
+            if max_z_grid_length != 0:
+                z_ratio[i, j] = z_grid_length / max_z_grid_length
+            else:
+                z_ratio[i, j] = 0
+            index += 1
+
+    keep_mask = np.zeros(len(points), dtype=bool)
+
+    index = 0
+    for i in range(len(x_bins) - 1):
+        for j in range(len(y_bins) - 1):
+            mask = (points_xy[:, 0] >= x_bins[i]) & (points_xy[:, 0] < x_bins[i + 1]) & \
+                   (points_xy[:, 1] >= y_bins[j]) & (points_xy[:, 1] < y_bins[j + 1])
+            if z_ratio[i, j] >= 0.5 and all_occupy_ratios[index] >= 0.2:
+                keep_mask |= mask
+            index += 1
+
+    filtered_points = points[keep_mask]
+    filtered_points_xy = filtered_points[:, :2]
+    filtered_points_max_x, filtered_points_min_x = np.max(filtered_points_xy[:, 0]), np.min(filtered_points_xy[:, 0])
+    filtered_points_max_y, filtered_points_min_y = np.max(filtered_points_xy[:, 1]), np.min(filtered_points_xy[:, 1])
+    filtered_points = points[(points[:, 0] >= filtered_points_min_x) & (points[:, 0] <= filtered_points_max_x) & 
+                            (points[:, 1] >= filtered_points_min_y) & (points[:, 1] <= filtered_points_max_y)]
+    # filtered_pcd = o3d.geometry.PointCloud()
+    # filtered_pcd.points = o3d.utility.Vector3dVector(filtered_points)
+    pcd.points = o3d.utility.Vector3dVector(filtered_points)
+
     return pcd
