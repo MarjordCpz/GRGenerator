@@ -179,25 +179,26 @@ def focal2fov(focal, pixels):
 
 def extract_floor_heights(scene_pcd_points):
 
-    def filter(z_hist):
-        # filter the histogram
-        threshold = np.mean(z_hist[0])
-
+    def filter(z_hist, window_size=5):
+        data = z_hist[0]
+        bins = z_hist[1]
+        window_avg = np.convolve(data, np.ones(window_size)/window_size, mode='valid')
+        mean = np.mean(data)
+        std = np.std(data)
+        threshold = mean - 0.5 * std if mean - 0.5 * std > 0 else mean
         left_bound = 0
-        for i in range(len(z_hist[0])):
-            if z_hist[0][i] > threshold:
-                left_bound = i - 1 if i > 0 else 0
+        for i in range(len(window_avg)):
+            if window_avg[i] > threshold:
+                left_bound = i if i > 0 else 0
+                break
+        right_bound = len(data) - 1
+        for i in range(len(window_avg) - 1, -1, -1):
+            if window_avg[i] > threshold:
+                right_bound = i + window_size - 1 if i + window_size - 1 < len(data) else len(data) - 1
                 break
 
-        right_bound = len(z_hist[0]) - 1
-        for i in range(len(z_hist[0]) - 1, -1, -1):
-            if z_hist[0][i] > threshold:
-                right_bound = i + 1 if i < len(z_hist[0]) - 2 else len(z_hist[0]) - 2
-                break
-            
-        z_hist_filtered = z_hist[0][left_bound:right_bound + 1]
-        z_hist_bins_filtered = z_hist[1][left_bound:right_bound + 2]
-
+        z_hist_filtered = data[left_bound:right_bound + 1]
+        z_hist_bins_filtered = bins[left_bound:right_bound + 2]
         return (z_hist_filtered, z_hist_bins_filtered)
 
 
@@ -214,9 +215,16 @@ def extract_floor_heights(scene_pcd_points):
     print("distance", distance)
     # set the min peak height based on the histogram
     # print(np.mean(z_hist_smooth))
-    min_peak_height = np.percentile(z_hist_smooth, 90)
+    min_peak_height = np.percentile(z_hist_smooth, 95)
     print("min_peak_height", min_peak_height)
     peaks, _ = find_peaks(z_hist_smooth, distance=distance, height=min_peak_height)
+    n_bins = len(z_hist_smooth)
+    if n_bins >= 2:
+        if z_hist_smooth[0] > z_hist_smooth[1]:
+            peaks = np.append(peaks, 0)
+        if z_hist_smooth[-1] > z_hist_smooth[-2]:
+            peaks = np.append(peaks, n_bins - 1)
+    peaks = np.unique(peaks)  
     import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(z_hist[1][:-1], z_hist_smooth)
@@ -255,7 +263,9 @@ def extract_floor_heights(scene_pcd_points):
             clustred_peaks.append(top_p)
             continue
         p = peaks[labels == i]
-        top_p = p[np.argsort(z_hist_smooth[p])[-2:]].tolist()
+        # top_p = p[np.argsort(z_hist_smooth[p])[-2:]].tolist()
+        max_index = p[np.argsort(z_hist_smooth[p])[-1]]
+        top_p = [max_index] * 2
         top_p = [z_hist[1][p] for p in top_p]
         clustred_peaks.append(top_p)
     clustred_peaks = [item for sublist in clustred_peaks for item in sublist]
